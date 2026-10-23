@@ -53,6 +53,13 @@ gemma = [
     "transformers>=4.50.0",
     "accelerate>=0.26.0",
 ]
+api = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+    "python-multipart>=0.0.9",
+    "pydantic>=2.6.0",
+    "httpx>=0.26.0",
+]
 all = [
     "chromadb>=0.5.0",
     "qdrant-client>=1.9.0",
@@ -63,11 +70,21 @@ all = [
     "sentence-transformers[image]>=6.1.0",
     "transformers>=4.50.0",
     "accelerate>=0.26.0",
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+    "python-multipart>=0.0.9",
+    "pydantic>=2.6.0",
+    "httpx>=0.26.0",
 ]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24.0",
     "ruff>=0.5.0",
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+    "python-multipart>=0.0.9",
+    "pydantic>=2.6.0",
+    "httpx>=0.26.0",
 ]
 
 [project.urls]
@@ -77,6 +94,7 @@ Issues = "https://github.com/TechyNilesh/DeepImageSearch/issues"
 
 [project.scripts]
 deep-image-search-mcp = "DeepImageSearch.agents.mcp_server:main"
+deep-image-search-server = "DeepImageSearch.server.cli:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -47,6 +47,7 @@ pip install "DeepImageSearch[all] @ git+https://github.com/TechyNilesh/DeepImage
 ### Optional Extras
 
 ```shell
+pip install "DeepImageSearch[api]"          # FastAPI HTTP Server REST API
 pip install "DeepImageSearch[gemma]"        # EmbeddingGemma 2 multimodal embeddings
 pip install "DeepImageSearch[llm]"          # LLM captioning (OpenAI SDK)
 pip install "DeepImageSearch[chroma]"       # ChromaDB vector store
@@ -234,6 +235,41 @@ from DeepImageSearch import ImageSearchTool
 
 tool = ImageSearchTool(index_path="./my_index")
 results = tool("a photo of a dog", k=5)
+```
+
+## HTTP Server REST API
+
+DeepImageSearch includes a production-grade FastAPI REST server for integration with external microservices, web apps, and cross-language frontends:
+
+```shell
+# Start the HTTP server
+deep-image-search-server --model clip-vit-b-32 --index-path ./my_index --port 8000
+```
+
+### Example Requests
+
+```shell
+# 1. Batch upload and index images
+curl -X POST "http://localhost:8000/api/v1/index/upload" \
+  -F "files=@./photos/img1.jpg" \
+  -F "files=@./photos/img2.jpg"
+
+# 2. Text-to-Image search
+curl -X POST "http://localhost:8000/api/v1/search/text" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "a sunset over mountains", "k": 5}'
+
+# 3. Image-to-Image search
+curl -X POST "http://localhost:8000/api/v1/search/image" \
+  -F "file=@./query.jpg" \
+  -F "k=5"
+
+# 4. Hybrid search
+curl -X POST "http://localhost:8000/api/v1/search/hybrid" \
+  -F "text_query=outdoor scene at dusk" \
+  -F "file=@./query.jpg" \
+  -F "text_weight=0.6" \
+  -F "k=5"
 ```
 
 ## Advanced Usage

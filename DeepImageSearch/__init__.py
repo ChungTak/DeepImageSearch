@@ -64,6 +64,12 @@ except ImportError:
 # Agent tools
 from DeepImageSearch.agents.tool_interface import ImageSearchTool
 
+# HTTP Server API (optional)
+try:
+    from DeepImageSearch.server import ServerConfig, create_app
+except ImportError:
+    pass
+
 __all__ = [
     # High-level
     "SearchEngine",
@@ -88,3 +94,6 @@ __all__ = [
     # Agent tools
     "ImageSearchTool",
 ]
+
+if "create_app" in locals():
+    __all__.extend(["create_app", "ServerConfig"])

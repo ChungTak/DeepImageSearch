@@ -13,6 +13,7 @@ Complete documentation for DeepImageSearch, organized by feature.
 7. [Agentic Integration](./07-agentic-integration.md) -- MCP server, LangChain tool, generic tool
 8. [Data Loading](./08-data-loading.md) -- Loading images from folders, CSV, lists
 9. [API Reference](./09-api-reference.md) -- Full API reference for all classes and methods
+10. [HTTP Server REST API](./10-http-server-api.md) -- FastAPI REST server, endpoints, and deployment
 
 ## Examples
 

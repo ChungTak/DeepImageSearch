@@ -324,17 +324,19 @@ class SearchEngine:
 
     # ── Persistence ─────────────────────────────────────────────────────────
 
-    def save(self) -> None:
+    def save(self, index_dir: Optional[str] = None) -> None:
         """Save the vector index and image records to disk."""
-        self.vector_store.save(self.index_dir)
-        self.metadata_store.save(self.index_dir)
-        logger.info(f"Index saved to {self.index_dir}")
+        target_dir = index_dir or self.index_dir
+        self.vector_store.save(target_dir)
+        self.metadata_store.save(target_dir)
+        logger.info(f"Index saved to {target_dir}")
 
-    def load(self) -> None:
+    def load(self, index_dir: Optional[str] = None) -> None:
         """Load an existing index and records from disk."""
-        self.vector_store.load(self.index_dir)
-        self.metadata_store.load(self.index_dir)
-        logger.info(f"Index loaded from {self.index_dir} ({self.vector_store.count()} vectors)")
+        target_dir = index_dir or self.index_dir
+        self.vector_store.load(target_dir)
+        self.metadata_store.load(target_dir)
+        logger.info(f"Index loaded from {target_dir} ({self.vector_store.count()} vectors)")
 
     # ── Info ────────────────────────────────────────────────────────────────
 
