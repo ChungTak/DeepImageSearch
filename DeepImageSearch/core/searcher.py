@@ -44,9 +44,10 @@ class Searcher:
         query: Union[str, Image.Image, np.ndarray],
         k: int = 10,
         filters: Optional[Dict[str, Any]] = None,
-        mode: Literal["auto", "text", "image", "hybrid"] = "auto",
+        mode: Literal["auto", "text", "image", "hybrid", "interleaved"] = "auto",
         text_weight: float = 0.5,
         image_query: Optional[Union[str, Image.Image]] = None,
+        interleaved: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Search for similar images.
@@ -63,19 +64,25 @@ class Searcher:
             Metadata filters passed to the vector store.
         mode : str
             'auto' detects query type, 'text' forces text search,
-            'image' forces image search, 'hybrid' combines both.
+            'image' forces image search, 'hybrid' combines both,
+            'interleaved' uses native multimodal embedding if supported.
         text_weight : float
             Weight for text query in hybrid mode (0-1). Image weight = 1 - text_weight.
         image_query : str or PIL.Image or None
             Secondary image query for hybrid mode.
+        interleaved : bool
+            Whether to use native interleaved multimodal query (EmbeddingGemma 2).
 
         Returns
         -------
         list[dict]
             Each dict has 'id', 'score', 'metadata' (including 'image_path').
         """
-        if mode == "hybrid":
-            return self._hybrid_search(query, image_query, k, filters, text_weight)
+        if mode == "hybrid" or mode == "interleaved" or interleaved:
+            use_interleaved = (mode == "interleaved") or interleaved
+            return self._hybrid_search(
+                query, image_query, k, filters, text_weight, interleaved=use_interleaved
+            )
 
         query_vector = self._resolve_query(query, mode)
         return self.vector_store.search(query_vector, k=k, filters=filters)
@@ -114,20 +121,25 @@ class Searcher:
         k: int,
         filters: Optional[Dict[str, Any]],
         text_weight: float,
+        interleaved: bool = False,
     ) -> List[Dict[str, Any]]:
-        """Combine text and image queries with weighted fusion."""
+        """Combine text and image queries with weighted fusion or interleaved single-pass."""
         if not self.embedding.supports_text:
-            raise ValueError("Hybrid search requires a CLIP-family embedding model")
+            raise ValueError("Hybrid search requires a CLIP-family or multimodal embedding model")
 
         # Get text vector
-        if isinstance(text_query, str):
-            text_vector = self.embedding.embed_text(text_query)
-        else:
+        if not isinstance(text_query, str):
             raise ValueError("In hybrid mode, the primary query must be a text string")
 
-        # Get image vector
         if image_query is None:
             raise ValueError("In hybrid mode, image_query must be provided")
+
+        if interleaved and hasattr(self.embedding, "embed_multimodal"):
+            combined = self.embedding.embed_multimodal(text=text_query, image=image_query)
+            combined = combined / (np.linalg.norm(combined) + 1e-12)
+            return self.vector_store.search(combined, k=k, filters=filters)
+
+        # Get image vector
         if isinstance(image_query, str):
             img = Image.open(image_query)
             image_vector = self.embedding.embed_image(img)
@@ -137,9 +149,11 @@ class Searcher:
         else:
             raise ValueError("image_query must be a file path or PIL Image")
 
+        text_vector = self.embedding.embed_text(text_query)
+
         # Weighted combination
         combined = text_weight * text_vector + (1.0 - text_weight) * image_vector
-        combined = combined / np.linalg.norm(combined)
+        combined = combined / (np.linalg.norm(combined) + 1e-12)
 
         return self.vector_store.search(combined, k=k, filters=filters)
 

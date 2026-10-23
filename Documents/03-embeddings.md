@@ -1,6 +1,33 @@
 # Embeddings
 
-DeepImageSearch supports two families of embedding models: CLIP-family (text + image) and timm (image-only).
+DeepImageSearch supports multiple families of embedding models: Google EmbeddingGemma 2 (text + image + multimodal), CLIP-family (text + image), and timm (image-only).
+
+## EmbeddingGemma 2 Presets
+
+[Google EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) is an open multimodal embedding model that unifies text, code, images, and audio into a shared 768-dimensional vector space.
+
+In DeepImageSearch, the 300M audio encoder is automatically skipped for image search pipelines (only 440M active parameters loaded). It also supports Matryoshka Representation Learning (MRL) dimension truncation (`512d`, `256d`, `128d`), vision soft token budgets, and native interleaved multimodal queries.
+
+| Preset Name | Model | Dimension | Text Search | Best For |
+|---|---|---|---|---|
+| `embeddinggemma-2` | Google EmbeddingGemma 2 | 768 | Yes | Native full dimension (440M active params) |
+| `embeddinggemma-2-512d` | Google EmbeddingGemma 2 | 512 | Yes | MRL 512d, high recall & low memory |
+| `embeddinggemma-2-256d` | Google EmbeddingGemma 2 | 256 | Yes | MRL 256d, 3x storage savings (~95% visual quality) |
+| `embeddinggemma-2-128d` | Google EmbeddingGemma 2 | 128 | Yes | MRL 128d, 6x compression (coarse retrieval) |
+
+```python
+from DeepImageSearch import SearchEngine
+
+# Use EmbeddingGemma 2 with MRL 256d truncation
+engine = SearchEngine(model_name="embeddinggemma-2-256d")
+
+# Or pass a local path or custom parameters:
+engine = SearchEngine(
+    model_name="embeddinggemma-2",
+    truncate_dim=256,
+    max_soft_tokens=560,
+)
+```
 
 ## CLIP Presets
 

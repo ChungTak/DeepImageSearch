@@ -99,6 +99,7 @@ class SearchEngine:
         captioner_base_url: Optional[str] = None,
         chroma_collection: str = "deep_image_search",
         qdrant_location: Optional[str] = None,
+        **kwargs: Any,
     ):
         self.model_name = model_name
         self.index_dir = index_dir
@@ -106,7 +107,7 @@ class SearchEngine:
 
         # Create embedding backend
         self.embedding: BaseEmbedding = EmbeddingManager.create(
-            model_name, device=device, batch_size=batch_size
+            model_name, device=device, batch_size=batch_size, **kwargs
         )
 
         # Create or use provided vector store
@@ -255,9 +256,10 @@ class SearchEngine:
         query: Union[str, Image.Image, np.ndarray],
         k: int = 10,
         filters: Optional[Dict[str, Any]] = None,
-        mode: Literal["auto", "text", "image", "hybrid"] = "auto",
+        mode: Literal["auto", "text", "image", "hybrid", "interleaved"] = "auto",
         text_weight: float = 0.5,
         image_query: Optional[Union[str, Image.Image]] = None,
+        interleaved: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Search for images.
@@ -271,11 +273,13 @@ class SearchEngine:
         filters : dict or None
             Metadata filters.
         mode : str
-            'auto', 'text', 'image', or 'hybrid'.
+            'auto', 'text', 'image', 'hybrid', or 'interleaved'.
         text_weight : float
             In hybrid mode, weight for text vs image (0-1).
         image_query : str or PIL.Image or None
             Secondary image for hybrid mode.
+        interleaved : bool
+            Whether to use interleaved single-pass multimodal encoding (EmbeddingGemma 2).
 
         Returns
         -------
@@ -286,6 +290,7 @@ class SearchEngine:
         return self.searcher.search(
             query, k=k, filters=filters, mode=mode,
             text_weight=text_weight, image_query=image_query,
+            interleaved=interleaved,
         )
 
     def search_by_text(self, text: str, k: int = 10, filters: Optional[Dict[str, Any]] = None):

@@ -91,7 +91,8 @@ class Search_Setup:
             image_size=image_size,
         )
 
-        index_dir = os.path.join(metadata_dir, model_name)
+        safe_model_name = model_name.replace("/", "_")
+        index_dir = os.path.join(metadata_dir, safe_model_name)
         os.makedirs(index_dir, exist_ok=True)
 
         self.vector_store = FAISSStore(

@@ -47,6 +47,7 @@ pip install "DeepImageSearch[all] @ git+https://github.com/TechyNilesh/DeepImage
 ### Optional Extras
 
 ```shell
+pip install "DeepImageSearch[gemma]"        # EmbeddingGemma 2 multimodal embeddings
 pip install "DeepImageSearch[llm]"          # LLM captioning (OpenAI SDK)
 pip install "DeepImageSearch[chroma]"       # ChromaDB vector store
 pip install "DeepImageSearch[qdrant]"       # Qdrant vector store
@@ -181,6 +182,10 @@ You can implement your own backend by subclassing `BaseMetadataStore`.
 
 | Preset | Model | Text Search | Best For |
 |---|---|---|---|
+| `embeddinggemma-2` | Google EmbeddingGemma 2 | Yes | State-of-the-art multimodal (768d, 440M params) |
+| `embeddinggemma-2-512d` | Google EmbeddingGemma 2 | Yes | MRL 512d, high recall & reduced storage |
+| `embeddinggemma-2-256d` | Google EmbeddingGemma 2 | Yes | MRL 256d, 3x storage savings, ~95% visual quality |
+| `embeddinggemma-2-128d` | Google EmbeddingGemma 2 | Yes | MRL 128d, 6x compression (fast coarse retrieval) |
 | `clip-vit-b-32` | CLIP ViT-B/32 | Yes | Fast, general purpose |
 | `clip-vit-b-16` | CLIP ViT-B/16 | Yes | Better accuracy |
 | `clip-vit-l-14` | CLIP ViT-L/14 | Yes | High accuracy |

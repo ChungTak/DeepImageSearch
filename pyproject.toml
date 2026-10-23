@@ -48,6 +48,11 @@ llm = ["openai>=1.50.0"]
 mcp = ["mcp[cli]>=1.0.0"]
 langchain = ["langchain-core>=0.3.0"]
 postgres = ["psycopg2-binary>=2.9.0"]
+gemma = [
+    "sentence-transformers[image]>=6.1.0",
+    "transformers>=4.50.0",
+    "accelerate>=0.26.0",
+]
 all = [
     "chromadb>=0.5.0",
     "qdrant-client>=1.9.0",
@@ -55,6 +60,9 @@ all = [
     "mcp[cli]>=1.0.0",
     "langchain-core>=0.3.0",
     "psycopg2-binary>=2.9.0",
+    "sentence-transformers[image]>=6.1.0",
+    "transformers>=4.50.0",
+    "accelerate>=0.26.0",
 ]
 dev = [
     "pytest>=8.0",

@@ -5,18 +5,31 @@ Embedding backends for DeepImageSearch.
 
 Supports:
 - CLIP / SigLIP / EVA-CLIP via open_clip  (text + image)
+- EmbeddingGemma 2 via sentence-transformers (text + image + interleaved multimodal)
 - timm CNN/ViT models                     (image only, legacy)
 """
 
 import logging
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 import torch
 from PIL import Image
 
 logger = logging.getLogger(__name__)
+
+VALID_MRL_DIMS = (128, 256, 512, 768)
+VALID_SOFT_TOKENS = (70, 140, 280, 560, 1120)
+
+GEMMA2_PRESETS = {
+    "embeddinggemma-2": {"model_id": "google/embeddinggemma-2", "truncate_dim": None},
+    "embeddinggemma-2-768d": {"model_id": "google/embeddinggemma-2", "truncate_dim": 768},
+    "embeddinggemma-2-512d": {"model_id": "google/embeddinggemma-2", "truncate_dim": 512},
+    "embeddinggemma-2-256d": {"model_id": "google/embeddinggemma-2", "truncate_dim": 256},
+    "embeddinggemma-2-128d": {"model_id": "google/embeddinggemma-2", "truncate_dim": 128},
+}
 
 
 class BaseEmbedding(ABC):
@@ -256,6 +269,257 @@ class CustomEmbedding(BaseEmbedding):
         return np.vstack(features).astype(np.float32)
 
 
+class EmbeddingGemma2Embedding(BaseEmbedding):
+    """
+    Google EmbeddingGemma 2 (google/embeddinggemma-2) multimodal embedding backend.
+
+    Supports unified 768d (or MRL-truncated 512d/256d/128d) text, image, and
+    interleaved multimodal embeddings via sentence-transformers (>=6.1.0).
+    """
+
+    supports_text: bool = True
+
+    def __init__(
+        self,
+        model_id: str = "google/embeddinggemma-2",
+        device: Optional[str] = None,
+        truncate_dim: Optional[int] = None,
+        load_audio_encoder: bool = False,
+        max_soft_tokens: Optional[int] = None,
+        query_prompt_name: str = "SearchQuery",
+        document_prompt_name: str = "Document",
+        torch_dtype: Optional[Any] = None,
+        batch_size: int = 32,
+        **kwargs: Any,
+    ):
+        try:
+            import torch
+            from sentence_transformers import SentenceTransformer
+        except ImportError as exc:
+            raise ImportError(
+                "google/embeddinggemma-2 requires 'sentence-transformers>=6.1.0' and 'transformers'. "
+                "Install them with: pip install 'DeepImageSearch[gemma]' or "
+                "pip install -U 'sentence-transformers[image]>=6.1.0' transformers"
+            ) from exc
+
+        if truncate_dim is not None and truncate_dim not in VALID_MRL_DIMS:
+            raise ValueError(
+                f"Invalid truncate_dim={truncate_dim} for EmbeddingGemma 2. "
+                f"Supported MRL dimensions are {VALID_MRL_DIMS}."
+            )
+
+        if max_soft_tokens is not None and max_soft_tokens not in VALID_SOFT_TOKENS:
+            raise ValueError(
+                f"Invalid max_soft_tokens={max_soft_tokens}. "
+                f"Supported vision token budgets are {VALID_SOFT_TOKENS}."
+            )
+
+        self.model_id = model_id
+        self.truncate_dim = truncate_dim
+        self.dimension = truncate_dim if truncate_dim is not None else 768
+        self.max_soft_tokens = max_soft_tokens
+        self.query_prompt_name = query_prompt_name
+        self.document_prompt_name = document_prompt_name
+        self.batch_size = batch_size
+
+        # 1. Resolve target device
+        if device is None:
+            if torch.cuda.is_available():
+                device = "cuda"
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                device = "mps"
+            else:
+                device = "cpu"
+        self.device = device
+
+        # 2. Enforce numerical precision safety (NEVER allow float16)
+        if torch_dtype is not None:
+            if torch_dtype == torch.float16 or str(torch_dtype) in ("float16", "fp16", "torch.float16"):
+                raise ValueError(
+                    "EmbeddingGemma 2 does not support float16 due to activation range overflow (NaN). "
+                    "Use torch.bfloat16 or torch.float32 instead."
+                )
+            resolved_dtype = torch_dtype
+        else:
+            if self.device.startswith("cuda") and torch.cuda.is_bf16_supported():
+                resolved_dtype = torch.bfloat16
+            else:
+                resolved_dtype = torch.float32
+        self.torch_dtype = resolved_dtype
+
+        # 3. Selective encoder loading: skip 300M audio encoder by default for image search
+        config_kwargs: Dict[str, Any] = kwargs.pop("config_kwargs", {})
+        if not load_audio_encoder and "audio_config" not in config_kwargs:
+            config_kwargs["audio_config"] = None
+
+        model_kwargs: Dict[str, Any] = kwargs.pop("model_kwargs", {})
+        model_kwargs.setdefault("torch_dtype", self.torch_dtype)
+
+        logger.info(
+            "Loading EmbeddingGemma2 (%s) on device=%s, dtype=%s, dim=%d, audio_encoder=%s",
+            self.model_id,
+            self.device,
+            self.torch_dtype,
+            self.dimension,
+            load_audio_encoder,
+        )
+
+        self.model = SentenceTransformer(
+            self.model_id,
+            device=self.device,
+            truncate_dim=self.truncate_dim,
+            config_kwargs=config_kwargs,
+            model_kwargs=model_kwargs,
+            **kwargs,
+        )
+
+    def _get_processing_kwargs(self) -> Optional[Dict[str, Any]]:
+        if self.max_soft_tokens is not None:
+            return {"image": {"max_soft_tokens": self.max_soft_tokens}}
+        return None
+
+    @staticmethod
+    def _prepare_image_input(image: Union[str, Path, Image.Image]) -> Dict[str, Any]:
+        """
+        Wrap image into SentenceTransformer's expected multimodal dict format {'image': <PIL.Image>}.
+        Converting local paths to RGB PIL.Image ensures consistent channel handling.
+        """
+        if isinstance(image, (str, Path)):
+            path_str = str(image)
+            if path_str.startswith(("http://", "https://")):
+                return {"image": path_str}
+            with Image.open(path_str) as img:
+                return {"image": img.convert("RGB")}
+        elif isinstance(image, Image.Image):
+            return {"image": image.convert("RGB")}
+        raise TypeError(f"Unsupported image input type: {type(image)}")
+
+    def embed_image(self, image: Union[str, Path, Image.Image]) -> np.ndarray:
+        """Encode a single image into a 1D L2-normalized float32 numpy vector of shape (D,)."""
+        item = self._prepare_image_input(image)
+        encode_kwargs: Dict[str, Any] = {
+            "normalize_embeddings": True,
+            "convert_to_numpy": True,
+        }
+        if self.truncate_dim is not None:
+            encode_kwargs["truncate_dim"] = self.truncate_dim
+        proc_kwargs = self._get_processing_kwargs()
+        if proc_kwargs is not None:
+            encode_kwargs["processing_kwargs"] = proc_kwargs
+
+        vec = self.model.encode(item, **encode_kwargs)
+        return np.asarray(vec, dtype=np.float32).reshape(-1)
+
+    def embed_images(
+        self,
+        images: List[Union[str, Path, Image.Image]],
+        batch_size: Optional[int] = None,
+        show_progress_bar: bool = False,
+    ) -> np.ndarray:
+        """Encode a batch of images into a 2D L2-normalized float32 numpy array of shape (N, D)."""
+        if not images:
+            return np.empty((0, self.dimension), dtype=np.float32)
+
+        items = [self._prepare_image_input(img) for img in images]
+        bs = batch_size if batch_size is not None else self.batch_size
+        encode_kwargs: Dict[str, Any] = {
+            "batch_size": bs,
+            "show_progress_bar": show_progress_bar,
+            "normalize_embeddings": True,
+            "convert_to_numpy": True,
+        }
+        if self.truncate_dim is not None:
+            encode_kwargs["truncate_dim"] = self.truncate_dim
+        proc_kwargs = self._get_processing_kwargs()
+        if proc_kwargs is not None:
+            encode_kwargs["processing_kwargs"] = proc_kwargs
+
+        vecs = self.model.encode(items, **encode_kwargs)
+        return np.asarray(vecs, dtype=np.float32).reshape(len(images), self.dimension)
+
+    def embed_text(
+        self,
+        text: Union[str, List[str]],
+        prompt_name: Optional[str] = None,
+    ) -> np.ndarray:
+        """
+        Encode text query (or list of queries) using asymmetric task instruction prefix.
+        Defaults to prompt_name='SearchQuery' ('task: search result | query: ').
+        """
+        is_single = isinstance(text, str)
+        active_prompt = prompt_name if prompt_name is not None else self.query_prompt_name
+        encode_kwargs: Dict[str, Any] = {
+            "prompt_name": active_prompt,
+            "normalize_embeddings": True,
+            "convert_to_numpy": True,
+        }
+        if self.truncate_dim is not None:
+            encode_kwargs["truncate_dim"] = self.truncate_dim
+
+        vecs = self.model.encode(text, **encode_kwargs)
+        arr = np.asarray(vecs, dtype=np.float32)
+        return arr.reshape(-1) if is_single else arr.reshape(len(text), self.dimension)
+
+    def embed_texts(
+        self,
+        texts: List[str],
+        prompt_name: Optional[str] = None,
+        batch_size: Optional[int] = None,
+        show_progress_bar: bool = False,
+    ) -> np.ndarray:
+        """Encode a batch of texts into a 2D L2-normalized float32 numpy array of shape (N, D)."""
+        if not texts:
+            return np.empty((0, self.dimension), dtype=np.float32)
+        active_prompt = prompt_name if prompt_name is not None else self.query_prompt_name
+        bs = batch_size if batch_size is not None else self.batch_size
+        encode_kwargs: Dict[str, Any] = {
+            "prompt_name": active_prompt,
+            "batch_size": bs,
+            "show_progress_bar": show_progress_bar,
+            "normalize_embeddings": True,
+            "convert_to_numpy": True,
+        }
+        if self.truncate_dim is not None:
+            encode_kwargs["truncate_dim"] = self.truncate_dim
+
+        vecs = self.model.encode(texts, **encode_kwargs)
+        arr = np.asarray(vecs, dtype=np.float32)
+        return arr.reshape(len(texts), self.dimension)
+
+    def embed_multimodal(
+        self,
+        text: str,
+        image: Union[str, Path, Image.Image],
+    ) -> np.ndarray:
+        """
+        Encode an interleaved text + image input in a single forward pass using '<|image|>'.
+        Enables native single-pass multimodal query composition in EmbeddingGemma 2.
+        """
+        img_dict = self._prepare_image_input(image)
+        formatted_text = text if "<|image|>" in text else f"{text} <|image|>"
+        payload = {
+            "text": formatted_text,
+            "image": img_dict["image"],
+        }
+        encode_kwargs: Dict[str, Any] = {
+            "normalize_embeddings": True,
+            "convert_to_numpy": True,
+        }
+        if self.truncate_dim is not None:
+            encode_kwargs["truncate_dim"] = self.truncate_dim
+        proc_kwargs = self._get_processing_kwargs()
+        if proc_kwargs is not None:
+            encode_kwargs["processing_kwargs"] = proc_kwargs
+
+        vec = self.model.encode(payload, **encode_kwargs)
+        return np.asarray(vec, dtype=np.float32).reshape(-1)
+
+    encode_image = embed_image
+    encode_images = embed_images
+    encode_text = embed_text
+    encode_texts = embed_texts
+
+
 # ── Factory ────────────────────────────────────────────────────────────────────
 
 # Common presets mapping friendly names to open_clip (model, pretrained) tuples
@@ -278,6 +542,7 @@ class EmbeddingManager:
     Usage
     -----
     >>> emb = EmbeddingManager.create("clip-vit-b-32")          # CLIP
+    >>> emb = EmbeddingManager.create("embeddinggemma-2")       # Gemma 2
     >>> emb = EmbeddingManager.create("vgg19")                  # timm legacy
     >>> emb = EmbeddingManager.create("clip-vit-l-14", device="cuda")
     """
@@ -295,7 +560,7 @@ class EmbeddingManager:
         Parameters
         ----------
         model_name : str
-            A preset name (e.g. 'clip-vit-b-32') or a raw timm model name.
+            A preset name (e.g. 'clip-vit-b-32', 'embeddinggemma-2') or a raw model name.
         device : str or None
             Target device.
         batch_size : int
@@ -306,6 +571,29 @@ class EmbeddingManager:
         BaseEmbedding
         """
         name_lower = model_name.lower().strip()
+
+        # Check EmbeddingGemma 2 presets or model names
+        if name_lower in GEMMA2_PRESETS or "embeddinggemma-2" in name_lower:
+            # Filter out legacy kwargs for timm/clip to prevent TypeError in SentenceTransformer
+            kwargs.pop("pretrained", None)
+            kwargs.pop("image_size", None)
+            explicit_truncate_dim = kwargs.pop("truncate_dim", None)
+            if name_lower in GEMMA2_PRESETS:
+                preset_cfg = GEMMA2_PRESETS[name_lower]
+                preset_dim = preset_cfg["truncate_dim"]
+                truncate_dim = explicit_truncate_dim if explicit_truncate_dim is not None else preset_dim
+                model_id = kwargs.pop("model_id", preset_cfg["model_id"])
+            else:
+                truncate_dim = explicit_truncate_dim
+                model_id = kwargs.pop("model_id", model_name)
+
+            return EmbeddingGemma2Embedding(
+                model_id=model_id,
+                device=device,
+                truncate_dim=truncate_dim,
+                batch_size=batch_size,
+                **kwargs,
+            )
 
         # Check CLIP presets
         if name_lower in CLIP_PRESETS:
