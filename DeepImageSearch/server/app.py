@@ -21,6 +21,7 @@ except ImportError as exc:
 
 from DeepImageSearch.server.config import ServerConfig
 from DeepImageSearch.server.schemas import (
+    DualSearchResponse,
     HealthResponse,
     IndexPathsRequest,
     IndexPersistenceRequest,
@@ -333,6 +334,69 @@ def create_app(
                 filters=filters,
             )
             return SearchResponse(query_mode=mode, count=len(results), results=results)
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    @app.post(
+        "/api/v1/search/dual",
+        response_model=DualSearchResponse,
+        dependencies=[Depends(verify_api_key)],
+        tags=["Search"],
+    )
+    def search_dual(
+        query: Optional[str] = Form(default=None, description="Natural language search query."),
+        ship_query: Optional[str] = Form(default=None, description="Optional ship crop query."),
+        scene_query: Optional[str] = Form(default=None, description="Optional scene query."),
+        file: Optional[UploadFile] = File(default=None, description="Uploaded query image file."),
+        filters_json: Optional[str] = Form(default=None, description="Structured filter JSON string."),
+        w1: float = Form(default=0.7, description="Ship crop retrieval weight."),
+        w2: float = Form(default=0.3, description="Scene retrieval weight."),
+        night_color_tolerance: bool = Form(default=True, description="Enable night color tolerance."),
+        k: int = Form(default=20, ge=1, le=200, description="Top-k results count."),
+        mgr: EngineManager = Depends(get_manager),
+    ) -> DualSearchResponse:
+        if not query and not ship_query and not scene_query and file is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Dual search requires at least one of 'query', 'ship_query', 'scene_query', or uploaded 'file'.",
+            )
+
+        filters = None
+        if filters_json:
+            try:
+                filters = json.loads(filters_json)
+            except json.JSONDecodeError as exc:
+                raise HTTPException(
+                    status_code=400, detail=f"Invalid filters_json: {exc}"
+                ) from exc
+
+        temp_path: Optional[str] = None
+        try:
+            if file is not None:
+                ext = Path(file.filename or "query.jpg").suffix.lower() or ".jpg"
+                if ext not in ALLOWED_IMAGE_EXTENSIONS:
+                    raise HTTPException(
+                        status_code=400, detail=f"Unsupported image extension: {ext}"
+                    )
+                with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+                    tmp.write(file.file.read())
+                    temp_path = tmp.name
+
+            results = mgr.search_dual(
+                query=query,
+                ship_query=ship_query,
+                scene_query=scene_query,
+                image_query=temp_path,
+                filters=filters,
+                w1=w1,
+                w2=w2,
+                night_color_tolerance=night_color_tolerance,
+                k=k,
+            )
+            return DualSearchResponse(query_mode="dual_fusion", count=len(results), results=results)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         finally:
             if temp_path and os.path.exists(temp_path):
                 os.remove(temp_path)

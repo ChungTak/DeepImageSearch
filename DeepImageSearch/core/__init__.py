@@ -4,3 +4,5 @@ from DeepImageSearch.core.embeddings import EmbeddingManager, CLIPEmbedding, Tim
 from DeepImageSearch.core.indexer import Indexer
 from DeepImageSearch.core.searcher import Searcher
 from DeepImageSearch.core.captioner import Captioner
+from DeepImageSearch.core.filter_utils import matches_filters, apply_night_color_tolerance
+

@@ -100,6 +100,43 @@ class TestFilters:
     def test_filtered_search_still_honours_k(self, populated_store):
         assert len(populated_store.search(unit(1, 0, 0, 0), k=1, filters={"colour": "red"})) == 1
 
+    def test_range_operators(self, populated_store):
+        # Update metadata for test records
+        populated_store._metadata[0]["duration_sec"] = 1500  # record 'a'
+        populated_store._metadata[1]["duration_sec"] = 800   # record 'b'
+        populated_store._metadata[2]["duration_sec"] = 2400  # record 'c'
+
+        res = populated_store.search(unit(1, 0, 0, 0), k=10, filters={"duration_sec": {"$gte": 1200}})
+        assert {r["id"] for r in res} == {"a", "c"}
+
+        res_lte = populated_store.search(unit(1, 0, 0, 0), k=10, filters={"duration_sec": {"$lte": 1000}})
+        assert {r["id"] for r in res_lte} == {"b"}
+
+    def test_in_operator(self, populated_store):
+        populated_store._metadata[0]["ship_size"] = "small"
+        populated_store._metadata[1]["ship_size"] = "medium"
+        populated_store._metadata[2]["ship_size"] = "large"
+
+        res = populated_store.search(unit(1, 0, 0, 0), k=10, filters={"ship_size": {"$in": ["small", "medium"]}})
+        assert {r["id"] for r in res} == {"a", "b"}
+
+    def test_logical_or_operator(self, populated_store):
+        populated_store._metadata[0]["ship_color"] = "red"
+        populated_store._metadata[0]["color_confidence"] = "high"
+
+        populated_store._metadata[1]["ship_color"] = "unknown"
+        populated_store._metadata[1]["color_confidence"] = "low"
+
+        populated_store._metadata[2]["ship_color"] = "blue"
+        populated_store._metadata[2]["color_confidence"] = "high"
+
+        res = populated_store.search(
+            unit(1, 0, 0, 0),
+            k=10,
+            filters={"$or": [{"ship_color": "red"}, {"color_confidence": "low"}]},
+        )
+        assert {r["id"] for r in res} == {"a", "b"}
+
 
 class TestDelete:
     def test_removes_vector_and_metadata(self, populated_store):

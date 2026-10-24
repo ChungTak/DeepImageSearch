@@ -71,3 +71,48 @@ class RecordListResponse(BaseModel):
     offset: int
     limit: int
     records: List[Dict[str, Any]]
+
+
+class ScoreDetail(BaseModel):
+    s_ship: float = Field(..., description="Ship crop retrieval similarity score.")
+    s_scene: float = Field(
+        ..., description="Full frame / context scene retrieval similarity score."
+    )
+
+
+class DualSearchResultItem(BaseModel):
+    group_id: str = Field(
+        ...,
+        description="Identifier for the aligned vessel track or detection group.",
+    )
+    score: float = Field(
+        ...,
+        description="Fused similarity score calculated as w1 * s_ship + w2 * s_scene.",
+    )
+    score_detail: ScoreDetail = Field(
+        ..., description="Individual branch retrieval scores."
+    )
+    ship_crop_image_id: Optional[str] = Field(
+        default=None, description="Image ID of the matched vessel crop."
+    )
+    context_crop_image_id: Optional[str] = Field(
+        default=None, description="Image ID of the context crop."
+    )
+    full_frame_image_id: Optional[str] = Field(
+        default=None, description="Image ID of the full frame image."
+    )
+    metadata: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Structured attributes and detection metadata.",
+    )
+
+
+class DualSearchResponse(BaseModel):
+    query_mode: str = Field(
+        default="dual_fusion", description="Search execution mode."
+    )
+    count: int = Field(..., description="Number of grouped results returned.")
+    results: List[DualSearchResultItem] = Field(
+        ..., description="Ranked list of fused group search results."
+    )
+

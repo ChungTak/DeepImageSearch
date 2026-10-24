@@ -2,6 +2,7 @@
 # Copyright (c) 2021 Nilesh Verma
 """Thread-safe engine state manager for DeepImageSearch HTTP API Server."""
 
+import copy
 import hashlib
 import inspect
 import logging
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from DeepImageSearch import SearchEngine
+from DeepImageSearch.core.filter_utils import apply_night_color_tolerance
 from DeepImageSearch.server.config import ServerConfig
 
 logger = logging.getLogger(__name__)
@@ -193,25 +195,26 @@ class EngineManager:
         filters: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         sig = inspect.signature(self.engine.search)
+        has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
         kwargs: Dict[str, Any] = {}
 
         # Adapt top-k parameter name across SearchEngine versions
-        if "k" in sig.parameters:
+        if "k" in sig.parameters or has_var_kw:
             kwargs["k"] = k
         elif "top_k" in sig.parameters:
             kwargs["top_k"] = k
         elif "number_of_images" in sig.parameters:
             kwargs["number_of_images"] = k
 
-        if filters is not None and "filters" in sig.parameters:
+        if filters is not None and ("filters" in sig.parameters or has_var_kw):
             kwargs["filters"] = filters
 
         if mode == "hybrid" or (query and image_query):
-            if "image_query" in sig.parameters:
+            if "image_query" in sig.parameters or has_var_kw:
                 kwargs["image_query"] = image_query
-            if "mode" in sig.parameters:
+            if "mode" in sig.parameters or has_var_kw:
                 kwargs["mode"] = mode or "hybrid"
-            if "text_weight" in sig.parameters:
+            if "text_weight" in sig.parameters or has_var_kw:
                 kwargs["text_weight"] = text_weight
             elif "weight" in sig.parameters:
                 kwargs["weight"] = text_weight
@@ -219,11 +222,11 @@ class EngineManager:
                 kwargs["alpha"] = text_weight
             raw_results = self.engine.search(query, **kwargs)
         elif image_query and not query:
-            if "mode" in sig.parameters and mode:
+            if "mode" in sig.parameters or has_var_kw:
                 kwargs["mode"] = mode
             raw_results = self.engine.search(image_query, **kwargs)
         else:
-            if "mode" in sig.parameters and mode:
+            if "mode" in sig.parameters or has_var_kw:
                 kwargs["mode"] = mode
             raw_results = self.engine.search(query, **kwargs)
 
@@ -253,6 +256,221 @@ class EngineManager:
                     }
                 )
         return normalized
+
+    def search_dual(
+        self,
+        query: Optional[str] = None,
+        ship_query: Optional[str] = None,
+        scene_query: Optional[str] = None,
+        image_query: Optional[str] = None,
+        filters: Optional[Dict[str, Any]] = None,
+        w1: float = 0.7,
+        w2: float = 0.3,
+        night_color_tolerance: bool = True,
+        k: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """
+        Execute dual-branch search combining ship crop and scene retrieval.
+
+        1. Priority structured filtering (with night color tolerance applied).
+        2. Dispatched retrieval: ship branch (s_ship) + scene branch (s_scene).
+        3. Alignment by group_id (or track_id).
+        4. Weighted score fusion: score = w1 * s_ship + w2 * s_scene.
+        5. Return Top-K fused group results.
+        """
+        if not query and not ship_query and not scene_query and not image_query:
+            raise ValueError(
+                "Provide at least one of 'query', 'ship_query', 'scene_query', or 'file'."
+            )
+
+        eff_filters = copy.deepcopy(filters) if filters else {}
+        if night_color_tolerance and eff_filters:
+            eff_filters = apply_night_color_tolerance(eff_filters) or {}
+        final_filters = eff_filters if eff_filters else None
+
+        ship_text = ship_query or query
+        scene_text = scene_query or query
+
+        ship_mode = "hybrid" if (ship_text and image_query) else ("text" if ship_text else "image")
+        scene_mode = "hybrid" if (scene_text and image_query) else ("text" if scene_text else "image")
+
+        fetch_k = max(k * 10, 100)
+
+        # Inspect if dataset contains explicit crop_type tags
+        has_crop_types = False
+        vector_store = getattr(self.engine, "vector_store", None)
+        metadata_list = getattr(vector_store, "_metadata", None)
+        if metadata_list and isinstance(metadata_list, list):
+            for m in metadata_list[:200]:
+                if isinstance(m, dict) and "crop_type" in m:
+                    has_crop_types = True
+                    break
+
+        if has_crop_types:
+            ship_filter = {"crop_type": "ship_crop"}
+            scene_filter = {"crop_type": {"$in": ["context_crop", "full_frame", "scene", "frame"]}}
+            if final_filters:
+                ship_branch_filters = copy.deepcopy(final_filters)
+                ship_branch_filters.update(ship_filter)
+                scene_branch_filters = copy.deepcopy(final_filters)
+                scene_branch_filters.update(scene_filter)
+            else:
+                ship_branch_filters = ship_filter
+                scene_branch_filters = scene_filter
+        else:
+            ship_branch_filters = final_filters
+            scene_branch_filters = final_filters
+
+        # Branch 1: Ship retrieval
+        ship_results = self.search(
+            query=ship_text,
+            image_query=image_query,
+            mode=ship_mode,
+            k=fetch_k,
+            filters=ship_branch_filters,
+        )
+
+        # Branch 2: Scene retrieval
+        scene_results = self.search(
+            query=scene_text,
+            image_query=image_query,
+            mode=scene_mode,
+            k=fetch_k,
+            filters=scene_branch_filters,
+        )
+
+        def _extract_group_id(item: Dict[str, Any]) -> str:
+            meta = item.get("metadata", {})
+            return str(
+                meta.get("group_id")
+                or meta.get("track_id")
+                or item.get("id")
+                or "group_unknown"
+            )
+
+        group_data: Dict[str, Dict[str, Any]] = {}
+
+        for res in ship_results:
+            gid = _extract_group_id(res)
+            entry = group_data.setdefault(
+                gid,
+                {
+                    "group_id": gid,
+                    "s_ship": 0.0,
+                    "s_scene": 0.0,
+                    "ship_crop_image_id": None,
+                    "context_crop_image_id": None,
+                    "full_frame_image_id": None,
+                    "metadata": {},
+                },
+            )
+            score = float(res.get("score", 0.0))
+            if score > entry["s_ship"]:
+                entry["s_ship"] = score
+
+            meta = res.get("metadata", {})
+            entry["metadata"].update(meta)
+
+            crop_type = meta.get("crop_type")
+            item_id = res.get("id")
+            if crop_type == "ship_crop" and not entry["ship_crop_image_id"]:
+                entry["ship_crop_image_id"] = item_id
+            elif crop_type in ("context_crop", "context") and not entry["context_crop_image_id"]:
+                entry["context_crop_image_id"] = item_id
+            elif crop_type in ("full_frame", "scene", "frame") and not entry["full_frame_image_id"]:
+                entry["full_frame_image_id"] = item_id
+            elif not entry["ship_crop_image_id"]:
+                entry["ship_crop_image_id"] = item_id
+
+            if meta.get("ship_crop_image_id"):
+                entry["ship_crop_image_id"] = meta["ship_crop_image_id"]
+            if meta.get("context_crop_image_id"):
+                entry["context_crop_image_id"] = meta["context_crop_image_id"]
+            if meta.get("full_frame_image_id"):
+                entry["full_frame_image_id"] = meta["full_frame_image_id"]
+
+        for res in scene_results:
+            gid = _extract_group_id(res)
+            entry = group_data.setdefault(
+                gid,
+                {
+                    "group_id": gid,
+                    "s_ship": 0.0,
+                    "s_scene": 0.0,
+                    "ship_crop_image_id": None,
+                    "context_crop_image_id": None,
+                    "full_frame_image_id": None,
+                    "metadata": {},
+                },
+            )
+            score = float(res.get("score", 0.0))
+            if score > entry["s_scene"]:
+                entry["s_scene"] = score
+
+            meta = res.get("metadata", {})
+            entry["metadata"].update(meta)
+
+            crop_type = meta.get("crop_type")
+            item_id = res.get("id")
+            if crop_type in ("context_crop", "context") and not entry["context_crop_image_id"]:
+                entry["context_crop_image_id"] = item_id
+            elif crop_type in ("full_frame", "scene", "frame") and not entry["full_frame_image_id"]:
+                entry["full_frame_image_id"] = item_id
+            elif crop_type == "ship_crop" and not entry["ship_crop_image_id"]:
+                entry["ship_crop_image_id"] = item_id
+            elif not entry["full_frame_image_id"]:
+                entry["full_frame_image_id"] = item_id
+
+            if meta.get("ship_crop_image_id"):
+                entry["ship_crop_image_id"] = meta["ship_crop_image_id"]
+            if meta.get("context_crop_image_id"):
+                entry["context_crop_image_id"] = meta["context_crop_image_id"]
+            if meta.get("full_frame_image_id"):
+                entry["full_frame_image_id"] = meta["full_frame_image_id"]
+
+        # Backfill missing crop image ids from metadata store if available
+        if metadata_list and isinstance(metadata_list, list):
+            ids_list = getattr(vector_store, "_ids", [])
+            for gid, entry in group_data.items():
+                if not (entry["ship_crop_image_id"] and entry["full_frame_image_id"]):
+                    for idx, m in enumerate(metadata_list):
+                        if isinstance(m, dict) and (m.get("group_id") == gid or m.get("track_id") == gid):
+                            ctype = m.get("crop_type")
+                            cid = ids_list[idx] if idx < len(ids_list) else None
+                            if ctype == "ship_crop" and not entry["ship_crop_image_id"]:
+                                entry["ship_crop_image_id"] = cid
+                            elif ctype in ("context_crop", "context") and not entry["context_crop_image_id"]:
+                                entry["context_crop_image_id"] = cid
+                            elif ctype in ("full_frame", "scene", "frame") and not entry["full_frame_image_id"]:
+                                entry["full_frame_image_id"] = cid
+
+        fused_results = []
+        for gid, entry in group_data.items():
+            s_ship = float(entry["s_ship"])
+            s_scene = float(entry["s_scene"])
+            fused_score = round(float(w1 * s_ship + w2 * s_scene), 4)
+
+            meta_clean = copy.deepcopy(entry["metadata"])
+            if "group_id" not in meta_clean:
+                meta_clean["group_id"] = gid
+
+            fused_results.append(
+                {
+                    "group_id": gid,
+                    "score": fused_score,
+                    "score_detail": {
+                        "s_ship": round(s_ship, 4),
+                        "s_scene": round(s_scene, 4),
+                    },
+                    "ship_crop_image_id": entry["ship_crop_image_id"],
+                    "context_crop_image_id": entry["context_crop_image_id"],
+                    "full_frame_image_id": entry["full_frame_image_id"],
+                    "metadata": meta_clean,
+                }
+            )
+
+        fused_results.sort(key=lambda x: x["score"], reverse=True)
+        return fused_results[:k]
 
     def get_records(self, offset: int = 0, limit: int = 50) -> Dict[str, Any]:
         all_records = self.engine.get_records() if hasattr(self.engine, "get_records") else []

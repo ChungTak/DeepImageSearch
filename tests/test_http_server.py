@@ -227,3 +227,138 @@ def test_cli_parser():
     assert args.port == 9000
     assert args.model == "clip-vit-l-14"
     assert args.api_key == "my-key"
+
+
+def test_dual_search_endpoint_basic(api_client: TestClient, sample_jpeg_bytes: bytes):
+    headers = {"X-API-Key": "test-secret-key"}
+
+    # 1. Dual search with natural language query
+    resp = api_client.post(
+        "/api/v1/search/dual",
+        data={
+            "query": "夜间停靠在码头边的红色小型渔船",
+            "w1": "0.7",
+            "w2": "0.3",
+            "k": "10",
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["query_mode"] == "dual_fusion"
+    assert body["count"] >= 1
+    first = body["results"][0]
+    assert "group_id" in first
+    assert "score" in first
+    assert "score_detail" in first
+    assert "s_ship" in first["score_detail"]
+    assert "s_scene" in first["score_detail"]
+
+
+def test_dual_search_with_crop_alignment(tmp_path: Path):
+    headers = {"X-API-Key": "test-secret-key"}
+
+    # Setup a mock engine returning different results for ship vs scene
+    engine = MagicMock()
+    engine.count = 2
+    engine.info.return_value = {"model_name": "mock", "vector_store": "faiss", "dimension": 128, "indexed_count": 2}
+
+    def fake_search(query, **kwargs):
+        filters = kwargs.get("filters") or {}
+        # Simulate ship branch vs scene branch
+        if "crop_type" in filters and filters["crop_type"] == "ship_crop":
+            return [
+                {
+                    "id": "fe4a77edc6599079df4678e011ebaf93",
+                    "score": 0.942,
+                    "metadata": {
+                        "group_id": "GRP_20261022_001",
+                        "crop_type": "ship_crop",
+                        "ship_crop_image_id": "fe4a77edc6599079df4678e011ebaf93",
+                        "camera_id": "CAM_DOCK_03",
+                        "camera_location": "东港区3号货运码头",
+                        "ship_type": "fishing_boat",
+                        "ship_size": "small",
+                        "ship_color": "red",
+                        "color_confidence": "high",
+                        "state": "stationary",
+                        "time_of_day": "night",
+                        "scene_zone": "dock",
+                        "start_time": "2026-10-22 21:15:00",
+                        "duration_sec": 2100,
+                    },
+                }
+            ]
+        else:
+            return [
+                {
+                    "id": "a1b2c3d4e5f6789012345678abcdef01",
+                    "score": 0.862,
+                    "metadata": {
+                        "group_id": "GRP_20261022_001",
+                        "crop_type": "full_frame",
+                        "context_crop_image_id": "77bc88edc6599079df4678e011eb0012",
+                        "full_frame_image_id": "a1b2c3d4e5f6789012345678abcdef01",
+                        "camera_id": "CAM_DOCK_03",
+                    },
+                }
+            ]
+
+    engine.search.side_effect = fake_search
+    # Add metadata to simulate crop_type detection
+    engine.vector_store = MagicMock()
+    engine.vector_store._metadata = [{"crop_type": "ship_crop"}, {"crop_type": "full_frame"}]
+
+    cfg = ServerConfig(
+        index_path=str(tmp_path / "index_dual"),
+        upload_dir=str(tmp_path / "uploads_dual"),
+        api_key="test-secret-key",
+    )
+    mgr = EngineManager(config=cfg, engine=engine)
+    client = TestClient(create_app(config=cfg, engine_manager=mgr))
+
+    resp = client.post(
+        "/api/v1/search/dual",
+        data={
+            "query": "夜间停靠在码头边的红色小型渔船",
+            "ship_query": "红色小型渔船",
+            "scene_query": "夜间码头泊位",
+            "w1": "0.7",
+            "w2": "0.3",
+            "filters_json": '{"duration_sec": {"$gte": 1200}, "ship_size": {"$in": ["small", "medium"]}}',
+            "night_color_tolerance": "true",
+            "k": "20",
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["query_mode"] == "dual_fusion"
+    assert data["count"] == 1
+    res = data["results"][0]
+    assert res["group_id"] == "GRP_20261022_001"
+    # 0.7 * 0.942 + 0.3 * 0.862 = 0.6594 + 0.2586 = 0.918
+    assert res["score"] == 0.918
+    assert res["score_detail"]["s_ship"] == 0.942
+    assert res["score_detail"]["s_scene"] == 0.862
+    assert res["ship_crop_image_id"] == "fe4a77edc6599079df4678e011ebaf93"
+    assert res["context_crop_image_id"] == "77bc88edc6599079df4678e011eb0012"
+    assert res["full_frame_image_id"] == "a1b2c3d4e5f6789012345678abcdef01"
+    assert res["metadata"]["ship_type"] == "fishing_boat"
+    assert res["metadata"]["camera_location"] == "东港区3号货运码头"
+
+
+def test_dual_search_validation_and_errors(api_client: TestClient):
+    headers = {"X-API-Key": "test-secret-key"}
+
+    # No query, ship_query, scene_query, or file
+    r_empty = api_client.post("/api/v1/search/dual", headers=headers)
+    assert r_empty.status_code == 400
+
+    # Invalid filters_json
+    r_invalid_json = api_client.post(
+        "/api/v1/search/dual",
+        data={"query": "test query", "filters_json": "{invalid-json"},
+        headers=headers,
+    )
+    assert r_invalid_json.status_code == 400

@@ -11,6 +11,7 @@ import faiss
 import numpy as np
 
 from DeepImageSearch._openmp import configure_faiss
+from DeepImageSearch.core.filter_utils import matches_filters
 from DeepImageSearch.vectorstores.base import BaseVectorStore
 
 logger = logging.getLogger(__name__)
@@ -88,8 +89,7 @@ class FAISSStore(BaseVectorStore):
             self.index.nprobe = min(20, self.index.nlist)
 
         # If filters are set, search more candidates and post-filter
-        search_k = k * 5 if filters else k
-        search_k = min(search_k, self.index.ntotal)
+        search_k = min(max(k * 10, 100), self.index.ntotal) if filters else min(k, self.index.ntotal)
 
         if search_k == 0:
             return []
@@ -111,19 +111,30 @@ class FAISSStore(BaseVectorStore):
             if len(results) >= k:
                 break
 
+        # If not enough results after filtering and index has more candidates, search full index
+        if filters and len(results) < k and search_k < self.index.ntotal:
+            full_k = self.index.ntotal
+            scores, indices = self.index.search(query, full_k)
+            results = []
+            for score, idx in zip(scores[0], indices[0]):
+                if idx < 0:
+                    continue
+                meta = self._metadata[idx] if idx < len(self._metadata) else {}
+                if not self._matches_filters(meta, filters):
+                    continue
+                results.append({
+                    "id": self._ids[idx],
+                    "score": float(score),
+                    "metadata": meta,
+                })
+                if len(results) >= k:
+                    break
+
         return results
 
     @staticmethod
     def _matches_filters(meta: Dict[str, Any], filters: Dict[str, Any]) -> bool:
-        for key, value in filters.items():
-            if key not in meta:
-                return False
-            if isinstance(value, list):
-                if meta[key] not in value:
-                    return False
-            elif meta[key] != value:
-                return False
-        return True
+        return matches_filters(meta, filters)
 
     def delete(self, ids: List[str]) -> None:
         # FAISS doesn't support deletion natively on all index types

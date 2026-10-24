@@ -343,7 +343,7 @@ Semantic text-to-image search. Encodes a natural language text query into vector
 |---|---|---|---|---|
 | `query` | `string` | **Yes** | - | Natural language text query (minimum length 1). |
 | `k` | `integer` | No | `10` | Number of nearest results to return (range: `1` to `200`). |
-| `filters` | `object` | No | `null` | Optional key-value equality filter conditions applied against metadata attributes. |
+| `filters` | `object` | No | `null` | Optional metadata filter conditions. Supports equality, range (`$gte`, `$lte`, `$gt`, `$lt`), membership (`$in`, `$nin`), inequality (`$ne`), and logical operators (`$or`, `$and`). |
 
 ##### Request Example
 ```json
@@ -351,7 +351,10 @@ Semantic text-to-image search. Encodes a natural language text query into vector
   "query": "a red vintage sports car parked near lake",
   "k": 5,
   "filters": {
-    "category": "vehicles"
+    "category": "vehicles",
+    "duration_sec": {"$gte": 1200},
+    "ship_size": {"$in": ["small", "medium"]},
+    "$or": [{"ship_color": "red"}, {"color_confidence": "low"}]
   }
 }
 ```
@@ -521,6 +524,104 @@ curl -X POST "http://localhost:8000/api/v1/search/hybrid" \
 
 ---
 
+#### `POST /api/v1/search/dual`
+
+双路索引融合搜索接口（Dual-Branch Index Fusion Search）。接收用户输入的搜索词（或语音转写文字）以及可选的查询图片，在服务端直接执行：**结构化过滤优先 $\rightarrow$ 船只 Crop 索引检索得分 $s_{\text{ship}}$ 与整帧/上下文场景索引检索得分 $s_{\text{scene}}$ $\rightarrow$ 按 `group_id` / `track_id` 对齐加权融合（$\text{score} = w_1 \cdot s_{\text{ship}} + w_2 \cdot s_{\text{scene}}$）**，最终返回融合打分排序后的 Top-K 船只目标。
+
+- **Endpoint**: `POST /api/v1/search/dual`
+- **Auth**: Required (`X-API-Key`)
+- **Content-Type**: `multipart/form-data`
+
+##### Request Form Fields
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `query` | `string` | Conditional | `null` | 搜索文字（用户直接输入的文字，或经语音识别转写后的查询文字，如 `"夜间停靠在码头边的红色小型渔船"`）。 |
+| `ship_query` | `string` | No | `null` | 可选的独立船只描述词（若不传，服务端直接用 `query` 检索 `ship_crop` 索引）。 |
+| `scene_query` | `string` | No | `null` | 可选的独立场景描述词（若不传，服务端直接用 `query` 检索 `full_frame` 索引）。 |
+| `file` | `file` (binary) | Conditional | `null` | 以图搜图时上传的查询图片（与 `query` 二选一或同时提供进行图文多模态检索）。 |
+| `filters_json` | `string` | No | `null` | 结构化优先过滤条件 JSON 字符串（支持 `camera_location`, `ship_color`, `ship_size`, `state`, `duration_sec` 等过滤，支持 `$gte`, `$lte`, `$in`, `$or`）。 |
+| `w1` | `float` | No | `0.7` | 船只 Crop 索引得分权重 $w_1$。 |
+| `w2` | `float` | No | `0.3` | 整帧/上下文场景索引得分权重 $w_2$。 |
+| `night_color_tolerance` | `boolean` | No | `true` | 是否开启夜间颜色降权容错（开启后对 `color_confidence="low"` 的夜间红外记录不因颜色词不匹配而淘汰）。 |
+| `k` | `integer` | No | `20` | 返回对齐去重后的 Top-K 船只结果数（范围：`1` 至 `200`）。 |
+
+> **注意**：`query`、`ship_query`、`scene_query` 与 `file` 至少需提供其一。上传图片在独立临时文件中处理，并在请求结束时由 `finally` 块确保立即清理。
+
+##### Response (200 OK)
+```json
+{
+  "query_mode": "dual_fusion",
+  "count": 1,
+  "results": [
+    {
+      "group_id": "GRP_20261022_001",
+      "score": 0.918,
+      "score_detail": {
+        "s_ship": 0.942,
+        "s_scene": 0.862
+      },
+      "ship_crop_image_id": "fe4a77edc6599079df4678e011ebaf93",
+      "context_crop_image_id": "77bc88edc6599079df4678e011eb0012",
+      "full_frame_image_id": "a1b2c3d4e5f6789012345678abcdef01",
+      "metadata": {
+        "camera_id": "CAM_DOCK_03",
+        "camera_location": "东港区3号货运码头",
+        "ship_type": "fishing_boat",
+        "ship_size": "small",
+        "ship_color": "red",
+        "color_confidence": "high",
+        "state": "stationary",
+        "time_of_day": "night",
+        "scene_zone": "dock",
+        "start_time": "2026-10-22 21:15:00",
+        "duration_sec": 2100
+      }
+    }
+  ]
+}
+```
+
+##### Error Responses
+- `400 Bad Request`: 未提供任何查询条件（`query`、`ship_query`、`scene_query`、`file` 均为空）、非法的 `filters_json` 格式，或上传了不支持的图片文件类型。
+- `401 Unauthorized`: 缺失或无效的 `X-API-Key` 鉴权头。
+
+##### cURL Examples
+
+**Option A: 文本语音转写词融合检索**
+```shell
+curl -X POST "http://localhost:8000/api/v1/search/dual" \
+  -H "X-API-Key: your-secure-api-key" \
+  -F "query=夜间停靠在码头边的红色小型渔船" \
+  -F "w1=0.7" \
+  -F "w2=0.3" \
+  -F "filters_json={\"duration_sec\": {\"$gte\": 1200}, \"ship_size\": {\"$in\": [\"small\", \"medium\"]}}" \
+  -F "night_color_tolerance=true" \
+  -F "k=20"
+```
+
+**Option B: 独立船只描述与场景描述检索**
+```shell
+curl -X POST "http://localhost:8000/api/v1/search/dual" \
+  -H "X-API-Key: your-secure-api-key" \
+  -F "ship_query=红色小型渔船" \
+  -F "scene_query=夜间码头货运区泊位" \
+  -F "w1=0.7" \
+  -F "w2=0.3" \
+  -F "k=10"
+```
+
+**Option C: 图片 + 结构化属性过滤融合检索**
+```shell
+curl -X POST "http://localhost:8000/api/v1/search/dual" \
+  -H "X-API-Key: your-secure-api-key" \
+  -F "file=@target_ship_reference.jpg" \
+  -F "scene_query=集装箱码头泊位" \
+  -F "filters_json={\"state\": \"stationary\"}" \
+  -F "k=10"
+```
+
+---
+
 ### 4.4 Records & Media Streaming Endpoints
 
 ---
@@ -639,9 +740,75 @@ curl -X GET "http://localhost:8000/api/v1/records/fe4a77edc6599079df4678e011ebaf
 
 ---
 
-## 5. End-to-End Python Client Examples
+## 5. 高级扩展接口设计规范与多模态双路融合搜索
 
-### Using `httpx`
+### 5.1 扩展 `filters` 支持范围与逻辑或操作符
+
+现有单向量检索及等值匹配（Equality Filter）已全面扩展。在 `/api/v1/search/*`（包括 `/search/text`、`/search/image`、`/search/hybrid` 和 `/search/dual`）的 `filters` / `filters_json` 中，原生支持以下结构化过滤操作符：
+
+#### 5.1.1 操作符规范与语义
+
+1. **`$gte` / `$lte`（数值与时间区间过滤）**：
+   - 过滤最小/最大持续时间（`duration_sec`）：`{"duration_sec": {"$gte": 1200, "$lte": 7200}}`；
+   - 过滤发生时间区间（`start_time`，支持 ISO 格式与标准时间字符串）：`{"start_time": {"$gte": "2026-10-22 20:00:00", "$lte": "2026-10-22 23:59:59"}}`。
+   - 同时也支持严格大于 `$gt` 与严格小于 `$lt`。
+
+2. **`$in` / `$nin`（集合多选与排除过滤）**：
+   - 多选船型：`{"ship_type": {"$in": ["fishing_boat", "cargo_ship"]}}`；
+   - 多选尺寸：`{"ship_size": {"$in": ["small", "medium"]}}`；
+   - 多选监控区域或泊位地点：`{"camera_location": {"$in": ["东港区3号货运码头", "西港区1号泊位"]}}`；
+   - 排除特定目标：`{"ship_type": {"$nin": ["tugboat"]}}`。
+
+3. **`$or` / `$and`（逻辑组合过滤）**：
+   - 满足任意分支条件：`{"$or": [{"ship_color": "red"}, {"color_confidence": "low"}]}`；
+   - 满足所有复合分支条件：`{"$and": [{"state": "stationary"}, {"$or": [{"ship_color": "red"}, {"color_confidence": "low"}]}]}`。
+
+4. **`$eq` / `$ne`（精确匹配与不等值过滤）**：
+   - 过滤非移动状态：`{"state": {"$ne": "moving"}}`。
+
+#### 5.1.2 组合过滤示例
+```json
+{
+  "duration_sec": {"$gte": 1200},
+  "ship_size": {"$in": ["small", "medium"]},
+  "$or": [
+    {"ship_color": "red"},
+    {"color_confidence": "low"}
+  ]
+}
+```
+
+---
+
+### 5.2 新增双路索引融合搜索接口：`POST /api/v1/search/dual`
+
+#### 5.2.1 业务背景与设计目标
+在港口监控与船舶布控场景下，单一的全局大图检索容易丢失船体局部细节（如船舷颜色、特定涂装、吃水标记），而单一的船只 Crop 切片检索则缺乏泊位、码头、岸线等宏观上下文。
+
+为此，系统采用**“双路索引拆开检索再按 Track/Group 对齐加权融合”**的设计：
+1. **结构化过滤优先**：先根据发生时间、持续时长、泊位区域及夜间颜色容错条件进行精准剪枝；
+2. **双路并行召回**：
+   - **船只局部路（Ship Crop Branch）**：检索 `ship_crop` 切片向量索引，得到针对船只细节的相似度得分 $s_{\text{ship}}$；
+   - **场景/上下文路（Scene / Context Branch）**：检索 `full_frame` 或 `context_crop` 向量索引，得到针对泊位与宏观场景的相似度得分 $s_{\text{scene}}$；
+3. **按 `group_id` / `track_id` 对齐融合**：
+   $$\text{score} = w_1 \cdot s_{\text{ship}} + w_2 \cdot s_{\text{scene}}$$
+   默认权重 $w_1 = 0.7$（偏重船只特征），$w_2 = 0.3$（场景环境辅助判定）；
+4. **输出对齐后的目标组结构**：返回统一的 `group_id`、融合分 `score`、分项得分明细 `score_detail`、各路图像 ID（`ship_crop_image_id`, `context_crop_image_id`, `full_frame_image_id`）及属性元数据。
+
+#### 5.2.2 夜间低照度颜色容错机制（`night_color_tolerance`）
+当参数 `night_color_tolerance=true`（默认开启）时：
+- 服务端检测到过滤条件中包含 `ship_color`（如 `{"ship_color": "red"}`）；
+- 自动将其转换为宽松的 OR 条件：
+  ```json
+  {"$or": [{"ship_color": "red"}, {"color_confidence": "low"}]}
+  ```
+- 从而确保在夜间低照度红外模式下，因缺少光照导致颜色置信度判定为 `"low"` 的有效目标不会被颜色词过滤错误淘汰。
+
+---
+
+## 6. End-to-End Python Client Examples
+
+### 6.1 Using `httpx` (Text, Image & Dual Fusion Search)
 
 ```python
 import httpx
@@ -664,7 +831,7 @@ with open("local_photo.jpg", "rb") as f:
     )
 print("Upload status:", upload_resp.json())
 
-# 3. Text search
+# 3. Standard text search
 search_resp = client.post(
     "/api/v1/search/text",
     json={"query": "outdoor scenic view", "k": 3},
@@ -673,16 +840,30 @@ results = search_resp.json()["results"]
 for r in results:
     print(f"Match ID: {r['id']}, Score: {r['score']:.4f}")
 
-# 4. Stream and display first image result
-if results:
-    top_id = results[0]["id"]
-    content_resp = client.get(f"/api/v1/records/{top_id}/content")
-    with open("downloaded_top_match.jpg", "wb") as f:
-        f.write(content_resp.content)
-    print("Saved top match image locally.")
+# 4. Dual-branch fusion search (/api/v1/search/dual)
+dual_resp = client.post(
+    "/api/v1/search/dual",
+    data={
+        "query": "夜间停靠在码头边的红色小型渔船",
+        "ship_query": "红色小型渔船",
+        "scene_query": "夜间货运码头泊位",
+        "w1": 0.7,
+        "w2": 0.3,
+        "night_color_tolerance": "true",
+        "filters_json": '{"duration_sec": {"$gte": 1200}, "ship_size": {"$in": ["small", "medium"]}}',
+        "k": 10,
+    },
+)
+dual_data = dual_resp.json()
+print(f"Dual fusion returned {dual_data['count']} groups:")
+for item in dual_data["results"]:
+    print(f"  Group ID: {item['group_id']}")
+    print(f"  Fused Score: {item['score']} (Ship: {item['score_detail']['s_ship']}, Scene: {item['score_detail']['s_scene']})")
+    print(f"  Ship Crop ID: {item['ship_crop_image_id']}, Full Frame ID: {item['full_frame_image_id']}")
+    print(f"  Metadata: {item['metadata']}")
 ```
 
-### Using `requests`
+### 6.2 Using `requests`
 
 ```python
 import requests
@@ -704,7 +885,7 @@ print("Similar images found:", resp.json())
 
 ---
 
-## 6. Production Deployment Recommendations
+## 7. Production Deployment Recommendations
 
 ### Running with Gunicorn / Uvicorn Workers
 
