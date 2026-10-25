@@ -52,7 +52,20 @@ def mock_engine(tmp_path: Path, sample_jpeg_bytes: bytes):
         engine.count += added
         return added
 
+    def fake_delete(ids, **kwargs):
+        id_list = [ids] if isinstance(ids, str) else list(ids)
+        deleted = sum(1 for rid in id_list if rid == "rec_001")
+        engine.count = max(0, engine.count - deleted)
+        return deleted
+
+    def fake_clear(**kwargs):
+        cleared = engine.count
+        engine.count = 0
+        return cleared
+
     engine.index.side_effect = fake_index
+    engine.delete.side_effect = fake_delete
+    engine.clear.side_effect = fake_clear
     engine.search.return_value = [
         {
             "id": "rec_001",
@@ -362,3 +375,135 @@ def test_dual_search_validation_and_errors(api_client: TestClient):
         headers=headers,
     )
     assert r_invalid_json.status_code == 400
+
+
+def test_delete_single_record_endpoint(api_client: TestClient):
+    headers = {"X-API-Key": "test-secret-key"}
+
+    # 1. Successful deletion
+    resp = api_client.delete("/api/v1/records/rec_001", headers=headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "deleted"
+    assert data["image_id"] == "rec_001"
+    assert data["deleted_count"] >= 1
+
+    # 2. Deletion of non-existent record
+    resp_404 = api_client.delete("/api/v1/records/rec_non_existent", headers=headers)
+    assert resp_404.status_code == 404
+
+
+def test_delete_batch_endpoint(api_client: TestClient):
+    headers = {"X-API-Key": "test-secret-key"}
+
+    # 1. Delete by image_ids
+    resp = api_client.post(
+        "/api/v1/index/delete",
+        json={"image_ids": ["rec_001"]},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "deleted"
+    assert "rec_001" in data["deleted_ids"]
+
+    # 2. Delete without ids or filters raises 400
+    resp_bad = api_client.post(
+        "/api/v1/index/delete",
+        json={},
+        headers=headers,
+    )
+    assert resp_bad.status_code == 400
+
+
+def test_delete_with_filters_endpoint(api_client: TestClient):
+    headers = {"X-API-Key": "test-secret-key"}
+
+    resp = api_client.post(
+        "/api/v1/index/delete",
+        json={"filters": {"caption": "A golden sunset"}},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "deleted"
+    assert "rec_001" in data["deleted_ids"]
+
+
+def test_clear_index_endpoints(api_client: TestClient):
+    headers = {"X-API-Key": "test-secret-key"}
+
+    # POST /api/v1/index/clear
+    resp = api_client.post("/api/v1/index/clear", json={"save_after_clear": True}, headers=headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "cleared"
+    assert data["total_indexed"] == 0
+
+    # DELETE /api/v1/index
+    resp_del = api_client.delete("/api/v1/index", headers=headers)
+    assert resp_del.status_code == 200
+    assert resp_del.json()["status"] == "cleared"
+
+
+def test_real_engine_deletion_integration(tmp_path: Path, monkeypatch, sample_jpeg_bytes: bytes):
+    from DeepImageSearch import SearchEngine
+    from tests.conftest import DummyEmbedding
+
+    monkeypatch.setattr(
+        "DeepImageSearch.core.embeddings.EmbeddingManager.create",
+        staticmethod(lambda *args, **kwargs: DummyEmbedding()),
+    )
+    img1 = tmp_path / "img1.jpg"
+    img2 = tmp_path / "img2.jpg"
+    img3 = tmp_path / "img3.jpg"
+    img1.write_bytes(sample_jpeg_bytes)
+    img2.write_bytes(sample_jpeg_bytes)
+    img3.write_bytes(sample_jpeg_bytes)
+
+    engine = SearchEngine(index_dir=str(tmp_path / "engine_idx"))
+    cfg = ServerConfig(index_path=str(tmp_path / "engine_idx"), upload_dir=str(tmp_path / "uploads"), api_key="secret")
+    mgr = EngineManager(config=cfg, engine=engine)
+    client = TestClient(create_app(config=cfg, engine_manager=mgr))
+    headers = {"X-API-Key": "secret"}
+
+    # 1. Index 3 images with metadata
+    r_idx = client.post(
+        "/api/v1/index/paths",
+        json={
+            "paths": [str(img1), str(img2), str(img3)],
+            "metadata": [
+                {"state": "active", "group": "g1"},
+                {"state": "inactive", "group": "g1"},
+                {"state": "inactive", "group": "g2"},
+            ],
+        },
+        headers=headers,
+    )
+    assert r_idx.status_code == 200
+    assert mgr.count == 3
+
+    # 2. Delete 1 by ID
+    records = mgr.engine.get_records()
+    first_id = records[0]["image_id"]
+    r_del1 = client.delete(f"/api/v1/records/{first_id}", headers=headers)
+    assert r_del1.status_code == 200
+    assert mgr.count == 2
+    assert client.get(f"/api/v1/records/{first_id}", headers=headers).status_code == 404
+
+    # 3. Delete by metadata filter
+    r_del_filter = client.post(
+        "/api/v1/index/delete",
+        json={"filters": {"state": "inactive"}},
+        headers=headers,
+    )
+    assert r_del_filter.status_code == 200
+    assert r_del_filter.json()["deleted_count"] >= 1
+
+    # 4. Clear remaining
+    r_clear = client.post("/api/v1/index/clear", headers=headers)
+    assert r_clear.status_code == 200
+    assert r_clear.json()["total_indexed"] == 0
+    assert mgr.count == 0
+
+

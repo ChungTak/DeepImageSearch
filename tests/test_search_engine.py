@@ -278,3 +278,34 @@ def test_custom_store_subclass_is_accepted_without_a_name_lookup(tmp_path):
     engine = SearchEngine(vector_store=store, index_dir=str(tmp_path))
     engine.index([], save=False)
     assert engine.vector_store is store
+
+
+class TestDeletion:
+    def test_delete_by_single_id(self, engine, image_paths):
+        engine.index(image_paths)
+        records = engine.get_records()
+        target_id = records[0]["image_id"]
+        initial_count = engine.count
+
+        deleted = engine.delete(target_id)
+        assert deleted == 1
+        assert engine.count == initial_count - 1
+        assert engine.get_record(target_id) is None
+
+    def test_delete_by_list_of_ids(self, engine, image_paths):
+        engine.index(image_paths)
+        records = engine.get_records()
+        delete_ids = [r["image_id"] for r in records[:2]]
+
+        deleted = engine.delete(delete_ids)
+        assert deleted == 2
+        assert engine.count == len(image_paths) - 2
+
+    def test_clear_index(self, engine, image_paths):
+        engine.index(image_paths)
+        assert engine.count > 0
+        cleared = engine.clear()
+        assert cleared > 0
+        assert engine.count == 0
+        assert engine.get_records() == []
+

@@ -46,6 +46,49 @@ class IndexPersistenceRequest(BaseModel):
     )
 
 
+class DeleteIndexRequest(BaseModel):
+    image_ids: Optional[List[str]] = Field(
+        default=None,
+        description="Optional list of image IDs to delete from the index.",
+    )
+    filters: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Optional metadata filters to match images for deletion.",
+    )
+    save_after_delete: bool = Field(
+        default=True,
+        description="Automatically persist index changes to disk after deletion.",
+    )
+
+
+class DeleteIndexResponse(BaseModel):
+    status: str = "deleted"
+    deleted_count: int = Field(..., description="Number of images removed from index.")
+    total_indexed: int = Field(..., description="Number of remaining indexed images.")
+    deleted_ids: List[str] = Field(default_factory=list, description="IDs of deleted images.")
+
+
+class DeleteRecordResponse(BaseModel):
+    status: str = "deleted"
+    image_id: str = Field(..., description="ID of the deleted image.")
+    deleted_count: int = Field(default=1, description="Number of deleted records.")
+    total_indexed: int = Field(..., description="Remaining total indexed images.")
+
+
+class ClearIndexRequest(BaseModel):
+    save_after_clear: bool = Field(
+        default=True,
+        description="Automatically persist emptied index state to disk.",
+    )
+
+
+class ClearIndexResponse(BaseModel):
+    status: str = "cleared"
+    deleted_count: int = Field(..., description="Number of purged images.")
+    total_indexed: int = Field(default=0, description="Total images remaining after clearing.")
+
+
+
 class TextSearchRequest(BaseModel):
     query: str = Field(..., min_length=1, description="Natural language search query.")
     k: int = Field(default=10, ge=1, le=200, description="Number of results to return.")

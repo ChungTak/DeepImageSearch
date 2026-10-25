@@ -21,6 +21,11 @@ except ImportError as exc:
 
 from DeepImageSearch.server.config import ServerConfig
 from DeepImageSearch.server.schemas import (
+    ClearIndexRequest,
+    ClearIndexResponse,
+    DeleteIndexRequest,
+    DeleteIndexResponse,
+    DeleteRecordResponse,
     DualSearchResponse,
     HealthResponse,
     IndexPathsRequest,
@@ -207,6 +212,46 @@ def create_app(
             return {"status": "loaded", "index_path": loaded_from, "total_indexed": mgr.count}
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/index/delete",
+        response_model=DeleteIndexResponse,
+        dependencies=[Depends(verify_api_key)],
+        tags=["Indexing"],
+    )
+    def delete_from_index(
+        req: DeleteIndexRequest,
+        mgr: EngineManager = Depends(get_manager),
+    ) -> DeleteIndexResponse:
+        try:
+            res = mgr.delete_records(
+                image_ids=req.image_ids,
+                filters=req.filters,
+                save_after_delete=req.save_after_delete,
+            )
+            return DeleteIndexResponse(**res)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/index/clear",
+        response_model=ClearIndexResponse,
+        dependencies=[Depends(verify_api_key)],
+        tags=["Indexing"],
+    )
+    @app.delete(
+        "/api/v1/index",
+        response_model=ClearIndexResponse,
+        dependencies=[Depends(verify_api_key)],
+        tags=["Indexing"],
+    )
+    def clear_index(
+        req: Optional[ClearIndexRequest] = None,
+        mgr: EngineManager = Depends(get_manager),
+    ) -> ClearIndexResponse:
+        save_after = req.save_after_clear if req else True
+        res = mgr.clear(save_after_clear=save_after)
+        return ClearIndexResponse(**res)
 
     @app.post(
         "/api/v1/search/text",
@@ -449,5 +494,22 @@ def create_app(
                 detail=f"Underlying image file not found on server for record {image_id}.",
             )
         return FileResponse(img_path)
+
+    @app.delete(
+        "/api/v1/records/{image_id}",
+        response_model=DeleteRecordResponse,
+        dependencies=[Depends(verify_api_key)],
+        tags=["Records", "Indexing"],
+    )
+    def delete_record(
+        image_id: str,
+        save_after_delete: bool = Query(default=True, description="Persist index after deletion."),
+        mgr: EngineManager = Depends(get_manager),
+    ) -> DeleteRecordResponse:
+        try:
+            res = mgr.delete_record(image_id=image_id, save_after_delete=save_after_delete)
+            return DeleteRecordResponse(**res)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     return app

@@ -322,6 +322,75 @@ class SearchEngine:
         record = self.metadata_store.get(image_id)
         return record.to_dict() if record else None
 
+    # ── Deletion ────────────────────────────────────────────────────────────
+
+    def delete(self, image_ids: Union[str, List[str]], save: bool = True) -> int:
+        """
+        Delete images from vector index and metadata store by image IDs.
+
+        Parameters
+        ----------
+        image_ids : str or list[str]
+            Single image ID or list of image IDs to delete.
+        save : bool
+            Whether to save index and metadata to disk after deletion.
+
+        Returns
+        -------
+        int
+            Number of records removed.
+        """
+        if isinstance(image_ids, str):
+            image_ids = [image_ids]
+        if not image_ids:
+            return 0
+
+        before_count = self.vector_store.count()
+        self.vector_store.delete(image_ids)
+        self.metadata_store.delete(image_ids)
+        after_count = self.vector_store.count()
+        deleted = max(0, before_count - after_count)
+
+        if save:
+            self.save()
+        return deleted
+
+    def clear(self, save: bool = True) -> int:
+        """
+        Clear all indexed vectors and metadata records.
+
+        Parameters
+        ----------
+        save : bool
+            Whether to save the emptied index to disk.
+
+        Returns
+        -------
+        int
+            Number of cleared records.
+        """
+        before_count = self.vector_store.count()
+        all_ids = []
+        if hasattr(self.vector_store, "_ids") and self.vector_store._ids:
+            all_ids = list(self.vector_store._ids)
+        elif hasattr(self.metadata_store, "list_all"):
+            all_ids = [r.image_id for r in self.metadata_store.list_all()]
+
+        if all_ids:
+            self.vector_store.delete(all_ids)
+            self.metadata_store.delete(all_ids)
+        else:
+            if hasattr(self.vector_store, "_build_index") and hasattr(self.vector_store, "dimension"):
+                self.vector_store._build_index(self.vector_store.dimension)
+                self.vector_store._ids = []
+                self.vector_store._metadata = []
+            if hasattr(self.metadata_store, "_records"):
+                self.metadata_store._records.clear()
+
+        if save:
+            self.save()
+        return before_count
+
     # ── Persistence ─────────────────────────────────────────────────────────
 
     def save(self, index_dir: Optional[str] = None) -> None:

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from DeepImageSearch import SearchEngine
-from DeepImageSearch.core.filter_utils import apply_night_color_tolerance
+from DeepImageSearch.core.filter_utils import apply_night_color_tolerance, matches_filters
 from DeepImageSearch.server.config import ServerConfig
 
 logger = logging.getLogger(__name__)
@@ -497,3 +497,145 @@ class EngineManager:
         if isinstance(rec, dict):
             return rec
         return vars(rec)
+
+    def delete_record(self, image_id: str, save_after_delete: bool = True) -> Dict[str, Any]:
+        """Delete a single image record and its vector by image_id."""
+        with self._lock:
+            rec = self.get_record(image_id)
+            has_vector = False
+            vstore = getattr(self.engine, "vector_store", None)
+            if vstore and hasattr(vstore, "_ids") and vstore._ids:
+                has_vector = image_id in vstore._ids
+
+            if rec is None and not has_vector:
+                raise KeyError(f"Image record '{image_id}' not found.")
+
+            before = self.count
+            if hasattr(self.engine, "delete") and callable(self.engine.delete):
+                self.engine.delete([image_id], save=save_after_delete)
+            else:
+                if vstore and hasattr(vstore, "delete"):
+                    vstore.delete([image_id])
+                mstore = getattr(self.engine, "metadata_store", None)
+                if mstore and hasattr(mstore, "delete"):
+                    mstore.delete([image_id])
+                if save_after_delete:
+                    self.save()
+
+            after = self.count
+            deleted_count = max(1, before - after) if (rec is not None or has_vector) else 0
+            return {
+                "status": "deleted",
+                "image_id": image_id,
+                "deleted_count": deleted_count,
+                "total_indexed": after,
+            }
+
+    def delete_records(
+        self,
+        image_ids: Optional[List[str]] = None,
+        filters: Optional[Dict[str, Any]] = None,
+        save_after_delete: bool = True,
+    ) -> Dict[str, Any]:
+        """Delete multiple image records by IDs or metadata filter conditions."""
+        if not image_ids and not filters:
+            raise ValueError("Provide at least one of 'image_ids' or 'filters'.")
+
+        with self._lock:
+            targets_to_delete: List[str] = []
+            if image_ids:
+                targets_to_delete.extend(image_ids)
+
+            if filters:
+                all_records = self.engine.get_records() if hasattr(self.engine, "get_records") else []
+                for r in all_records:
+                    r_dict = r.to_dict() if hasattr(r, "to_dict") else dict(r)
+                    if matches_filters(r_dict, filters):
+                        rid = str(r_dict.get("image_id", r_dict.get("id", "")))
+                        if rid:
+                            targets_to_delete.append(rid)
+
+                vstore = getattr(self.engine, "vector_store", None)
+                v_meta = getattr(vstore, "_metadata", None)
+                v_ids = getattr(vstore, "_ids", None)
+                if v_meta and v_ids and len(v_meta) == len(v_ids):
+                    for idx, m in enumerate(v_meta):
+                        if isinstance(m, dict) and matches_filters(m, filters):
+                            targets_to_delete.append(v_ids[idx])
+
+            unique_targets = list(dict.fromkeys(targets_to_delete))
+            if not unique_targets:
+                return {
+                    "status": "deleted",
+                    "deleted_count": 0,
+                    "total_indexed": self.count,
+                    "deleted_ids": [],
+                }
+
+            before = self.count
+            if hasattr(self.engine, "delete") and callable(self.engine.delete):
+                self.engine.delete(unique_targets, save=save_after_delete)
+            else:
+                vstore = getattr(self.engine, "vector_store", None)
+                if vstore and hasattr(vstore, "delete"):
+                    vstore.delete(unique_targets)
+                mstore = getattr(self.engine, "metadata_store", None)
+                if mstore and hasattr(mstore, "delete"):
+                    mstore.delete(unique_targets)
+                if save_after_delete:
+                    self.save()
+
+            after = self.count
+            deleted_count = max(0, before - after)
+            if deleted_count == 0 and unique_targets:
+                deleted_count = len(unique_targets)
+
+            return {
+                "status": "deleted",
+                "deleted_count": deleted_count,
+                "total_indexed": after,
+                "deleted_ids": unique_targets,
+            }
+
+    def clear(self, save_after_clear: bool = True) -> Dict[str, Any]:
+        """Clear the entire index and all metadata records."""
+        with self._lock:
+            before = self.count
+            if hasattr(self.engine, "clear") and callable(self.engine.clear):
+                self.engine.clear(save=save_after_clear)
+            else:
+                all_ids = []
+                vstore = getattr(self.engine, "vector_store", None)
+                if vstore and hasattr(vstore, "_ids") and vstore._ids:
+                    all_ids = list(vstore._ids)
+                elif hasattr(self.engine, "get_records"):
+                    all_records = self.engine.get_records()
+                    all_ids = [
+                        str(r.get("image_id", r.get("id", "")))
+                        for r in all_records
+                        if isinstance(r, dict)
+                    ]
+
+                if all_ids:
+                    if vstore and hasattr(vstore, "delete"):
+                        vstore.delete(all_ids)
+                    mstore = getattr(self.engine, "metadata_store", None)
+                    if mstore and hasattr(mstore, "delete"):
+                        mstore.delete(all_ids)
+                else:
+                    if vstore and hasattr(vstore, "_build_index") and hasattr(vstore, "dimension"):
+                        vstore._build_index(vstore.dimension)
+                        vstore._ids = []
+                        vstore._metadata = []
+                    mstore = getattr(self.engine, "metadata_store", None)
+                    if mstore and hasattr(mstore, "_records"):
+                        mstore._records.clear()
+
+                if save_after_clear:
+                    self.save()
+
+            return {
+                "status": "cleared",
+                "deleted_count": before,
+                "total_indexed": self.count,
+            }

@@ -327,6 +327,111 @@ curl -X POST "http://localhost:8000/api/v1/index/load" \
 
 ---
 
+#### `POST /api/v1/index/delete`
+
+批量从向量索引和元数据目录中删除图像记录。支持通过图像唯一 ID 列表（`image_ids`）或结构化元数据过滤条件（`filters`，支持 `$gte`、`$lte`、`$in`、`$or` 等操作符）指定删除目标。
+
+- **Auth**: Required (`X-API-Key`)
+- **Content-Type**: `application/json`
+
+##### Request Body
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `image_ids` | `array[string]` | Conditional | `null` | 待删除的图像唯一 ID 列表。与 `filters` 至少提供其一。 |
+| `filters` | `object` | Conditional | `null` | 结构化元数据过滤条件，匹配该条件的图像均会被删除。与 `image_ids` 至少提供其一。 |
+| `save_after_delete` | `boolean` | No | `true` | 删除完成后是否自动将最新索引与元数据落盘保存。 |
+
+##### Request Example (按 ID 列表删除)
+```json
+{
+  "image_ids": [
+    "fe4a77edc6599079df4678e011ebaf93",
+    "a1b2c3d4e5f6789012345678abcdef01"
+  ],
+  "save_after_delete": true
+}
+```
+
+##### Request Example (按结构化条件过滤删除)
+```json
+{
+  "filters": {
+    "state": "inactive",
+    "duration_sec": {"$lte": 60}
+  },
+  "save_after_delete": true
+}
+```
+
+##### Response (200 OK)
+```json
+{
+  "status": "deleted",
+  "deleted_count": 2,
+  "total_indexed": 1252,
+  "deleted_ids": [
+    "fe4a77edc6599079df4678e011ebaf93",
+    "a1b2c3d4e5f6789012345678abcdef01"
+  ]
+}
+```
+
+##### Error Responses
+- `400 Bad Request`: 未提供 `image_ids` 与 `filters`（两者均为空）。
+- `401 Unauthorized`: 缺少或无效的 `X-API-Key` 鉴权头。
+
+##### cURL Example
+```shell
+curl -X POST "http://localhost:8000/api/v1/index/delete" \
+  -H "X-API-Key: your-secure-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "image_ids": ["fe4a77edc6599079df4678e011ebaf93"],
+    "save_after_delete": true
+  }'
+```
+
+---
+
+#### `POST /api/v1/index/clear` / `DELETE /api/v1/index`
+
+清空当前索引库中的全部向量与元数据记录（重置为空索引）。同时支持 `POST /api/v1/index/clear` 与 RESTful 风格的 `DELETE /api/v1/index`。
+
+- **Auth**: Required (`X-API-Key`)
+- **Content-Type**: `application/json`
+
+##### Request Body (Optional)
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `save_after_clear` | `boolean` | No | `true` | 清空后是否立即将空索引状态持久化写入磁盘。 |
+
+##### Response (200 OK)
+```json
+{
+  "status": "cleared",
+  "deleted_count": 1252,
+  "total_indexed": 0
+}
+```
+
+##### Error Responses
+- `401 Unauthorized`: 缺少或无效的 `X-API-Key` 鉴权头。
+
+##### cURL Examples
+```shell
+# 方式一：POST /api/v1/index/clear
+curl -X POST "http://localhost:8000/api/v1/index/clear" \
+  -H "X-API-Key: your-secure-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"save_after_clear": true}'
+
+# 方式二：DELETE /api/v1/index
+curl -X DELETE "http://localhost:8000/api/v1/index" \
+  -H "X-API-Key: your-secure-api-key"
+```
+
+---
+
 ### 4.3 Search Endpoints
 
 ---
@@ -740,6 +845,44 @@ curl -X GET "http://localhost:8000/api/v1/records/fe4a77edc6599079df4678e011ebaf
 
 ---
 
+#### `DELETE /api/v1/records/{image_id}`
+
+从向量索引和元数据目录中删除指定的单张图像记录。
+
+- **Auth**: Required (`X-API-Key`)
+
+##### Path Parameters
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `image_id` | `string` | **Yes** | 待删除的图像唯一标识符。 |
+
+##### Query Parameters
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `save_after_delete` | `boolean` | No | `true` | 删除完成后是否自动持久化写入磁盘。 |
+
+##### Response (200 OK)
+```json
+{
+  "status": "deleted",
+  "image_id": "fe4a77edc6599079df4678e011ebaf93",
+  "deleted_count": 1,
+  "total_indexed": 1251
+}
+```
+
+##### Error Responses
+- `404 Not Found`: 指定的 `image_id` 在索引与元数据库中均不存在。
+- `401 Unauthorized`: 缺少或无效的 `X-API-Key` 鉴权头。
+
+##### cURL Example
+```shell
+curl -X DELETE "http://localhost:8000/api/v1/records/fe4a77edc6599079df4678e011ebaf93?save_after_delete=true" \
+  -H "X-API-Key: your-secure-api-key"
+```
+
+---
+
 ## 5. 高级扩展接口设计规范与多模态双路融合搜索
 
 ### 5.1 扩展 `filters` 支持范围与逻辑或操作符
@@ -861,6 +1004,21 @@ for item in dual_data["results"]:
     print(f"  Fused Score: {item['score']} (Ship: {item['score_detail']['s_ship']}, Scene: {item['score_detail']['s_scene']})")
     print(f"  Ship Crop ID: {item['ship_crop_image_id']}, Full Frame ID: {item['full_frame_image_id']}")
     print(f"  Metadata: {item['metadata']}")
+
+# 5. Delete single record by ID
+del_resp = client.delete(f"/api/v1/records/{results[0]['id']}?save_after_delete=true")
+print("Deleted single record:", del_resp.json())
+
+# 6. Batch delete by metadata filter
+batch_del = client.post(
+    "/api/v1/index/delete",
+    json={"filters": {"tag": "outdoor"}},
+)
+print("Batch deleted by filter:", batch_del.json())
+
+# 7. Clear entire index
+clear_resp = client.post("/api/v1/index/clear", json={"save_after_clear": True})
+print("Cleared index:", clear_resp.json())
 ```
 
 ### 6.2 Using `requests`
